@@ -1,128 +1,92 @@
+from pathlib import Path
 import pandas as pd
-import plotly.express as px
 import streamlit as st
 
-st.set_page_config(page_title="MOM'S NUTRI", page_icon="🍔", layout="wide")
-st.markdown("""<style>
-.stApp {background: #fffaf3;} h1,h2,h3 {color: #773817;}
-div[data-testid="stMetric"] {background: white; border-radius: 14px; padding: 15px;}
-</style>""", unsafe_allow_html=True)
+st.set_page_config(page_title="MOM'S NUTRI | 맘스터치 칼로리", page_icon="🍔", layout="wide")
+st.markdown("""<style>.block-container{max-width:1150px;padding-top:2rem}.stMetric{background:#fff4e9;padding:12px;border-radius:12px}</style>""", unsafe_allow_html=True)
+st.title("🍔 MOM'S NUTRI")
+st.caption("맘스터치 메뉴 칼로리 검색 · 비교 · 세트 계산 | 비공식 교육용 프로젝트")
 
-NUMERIC = {"kcal": "열량(kcal)", "carbs_g": "탄수화물(g)", "protein_g": "단백질(g)",
-           "fat_g": "지방(g)", "sugar_g": "당류(g)", "sodium_mg": "나트륨(mg)"}
-REQUIRED = ["name", "category", *NUMERIC, "image_url", "source_url", "verified_date"]
-
+DATA_FILE = Path(__file__).with_name("menu_data.csv")
 @st.cache_data
 
 def load_data():
-    df = pd.read_csv("menu_data.csv", dtype={"name": str, "category": str})
-    missing = set(REQUIRED) - set(df.columns)
+    df = pd.read_csv(DATA_FILE, encoding="utf-8-sig")
+    required = {"name", "category", "serving", "kcal", "source_url", "image_url"}
+    missing = required - set(df.columns)
     if missing:
-        raise ValueError(f"CSV에 필요한 열이 없습니다: {', '.join(sorted(missing))}")
-    df = df.dropna(subset=["name"]).copy()
-    df["name"] = df["name"].astype(str).str.strip()
-    df = df[df["name"] != ""].drop_duplicates("name")
-    df["category"] = df["category"].fillna("기타")
-    for col in NUMERIC:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-        df.loc[df[col] < 0, col] = float("nan")
-    for col in ("image_url", "source_url", "verified_date"):
-        df[col] = df[col].fillna("").astype(str).str.strip()
+        raise ValueError("CSV에 필요한 열이 없습니다: " + ", ".join(sorted(missing)))
+    df["kcal"] = pd.to_numeric(df["kcal"], errors="coerce")
+    df["name"] = df["name"].fillna("").astype(str)
+    df["category"] = df["category"].fillna("기타").astype(str)
     return df
 
 try:
-    df = load_data()
-except (FileNotFoundError, ValueError, pd.errors.ParserError) as exc:
-    st.error(f"데이터를 불러올 수 없습니다: {exc}")
+    data = load_data()
+except (FileNotFoundError, ValueError, UnicodeError, pd.errors.ParserError) as e:
+    st.error(f"메뉴 파일을 불러오지 못했습니다: {e}")
+    st.info("app.py와 menu_data.csv가 GitHub 저장소의 같은 위치에 있는지 확인하세요.")
     st.stop()
 
-st.title("🍔 MOM'S NUTRI")
-st.caption("맘스터치 메뉴 탐색 · 영양성분 비교 · 세트 계산")
-st.info("학습용 비공식 앱입니다. CSV에 공식 자료를 확인하여 입력한 수치만 표시합니다. 빈칸은 0이 아니라 '정보 없음'입니다.")
+st.warning("칼로리는 제3자 데이터베이스의 참고값입니다. 최신 공식 수치 및 현재 판매 여부는 확인이 필요합니다. 치킨 100g과 버거 1개의 칼로리를 직접 비교하지 마세요.")
+tab1, tab2, tab3, tab4 = st.tabs(["🍔 메뉴 찾기", "⚖️ 칼로리 비교", "🧮 식사 계산기", "🎯 목표 칼로리"])
 
-page = st.sidebar.radio("기능 선택", ["🍔 전체 메뉴", "📊 메뉴 비교", "🍟 세트 계산", "🎯 목표 칼로리"])
+with tab1:
+    search = st.text_input("메뉴 이름 검색", placeholder="예: 싸이버거")
+    cats = ["전체"] + sorted(data["category"].unique().tolist())
+    cat = st.selectbox("종류", cats)
+    found = data[data["name"].str.contains(search, case=False, regex=False, na=False)]
+    if cat != "전체":
+        found = found[found["category"] == cat]
+    st.caption(f"검색 결과: {len(found)}개")
+    if found.empty:
+        st.info("검색 결과가 없습니다. 다른 이름을 입력해 보세요.")
+    for start in range(0, len(found), 3):
+        cols = st.columns(3)
+        for col, (_, row) in zip(cols, found.iloc[start:start+3].iterrows()):
+            with col:
+                with st.container(border=True):
+                    if pd.notna(row["image_url"]) and str(row["image_url"]).strip():
+                        st.image(str(row["image_url"]), use_container_width=True)
+                    else:
+                        st.markdown("### 🍔 📷 사진 준비 중")
+                    st.subheader(row["name"])
+                    st.caption(f"{row['category']} · 기준: {row['serving']}")
+                    st.metric("칼로리", f"{row['kcal']:,.0f} kcal" if pd.notna(row["kcal"]) else "정보 없음")
+                    if pd.notna(row["source_url"]) and str(row["source_url"]).startswith("https://"):
+                        st.link_button("칼로리 출처 확인", str(row["source_url"]))
 
-def fmt(value, unit=""):
-    return "정보 없음" if pd.isna(value) else f"{value:,.1f}{unit}"
+with tab2:
+    options = data["name"].tolist()
+    selected = st.multiselect("비교할 메뉴 선택 (최대 5개)", options, default=options[:2], max_selections=5)
+    comparison = data[data["name"].isin(selected)].dropna(subset=["kcal"])
+    if not comparison.empty:
+        st.bar_chart(comparison.set_index("name")["kcal"])
+        st.dataframe(comparison[["name", "serving", "kcal"]].rename(columns={"name":"메뉴", "serving":"기준량", "kcal":"kcal"}), hide_index=True, use_container_width=True)
+        st.caption("제공량이 다른 메뉴의 수치는 동일 조건의 비교가 아닙니다.")
+    else:
+        st.info("칼로리 정보가 있는 메뉴를 선택하세요.")
 
-def card(row):
-    with st.container(border=True):
-        if row["image_url"].startswith("https://"):
-            st.image(row["image_url"], use_container_width=True)
+with tab3:
+    st.write("선택한 메뉴와 수량을 합산합니다. 100g 기준 메뉴는 수량 1이 100g입니다.")
+    choices = st.multiselect("먹을 메뉴 선택", options, key="meal")
+    total = 0.0
+    for name in choices:
+        row = data[data["name"] == name].iloc[0]
+        qty = st.number_input(f"{name} ({row['serving']}) 수량", min_value=0, max_value=30, value=1, step=1, key=f"qty_{name}")
+        if pd.notna(row["kcal"]):
+            total += float(row["kcal"]) * qty
         else:
-            st.markdown("### 🍽️ 사진 준비 중")
-        st.subheader(row["name"])
-        st.caption(row["category"])
-        st.write("🔥 " + fmt(row["kcal"], " kcal"))
-        if row["source_url"].startswith("https://"):
-            st.link_button("영양정보 출처", row["source_url"])
-        if row["verified_date"]:
-            st.caption("확인일: " + row["verified_date"])
+            st.warning(f"{name}: 칼로리 정보가 없어 합산에서 제외됩니다.")
+    st.metric("선택한 메뉴 합계", f"{total:,.0f} kcal")
 
-def detail(row):
-    st.subheader(row["name"] + " 영양정보")
-    cols = st.columns(3)
-    for i, (key, label) in enumerate(NUMERIC.items()):
-        cols[i % 3].metric(label, fmt(row[key]))
-    plot = pd.DataFrame([{"성분": label, "함량": row[key]} for key, label in NUMERIC.items() if key not in ("kcal", "sodium_mg") and pd.notna(row[key])])
-    if not plot.empty:
-        st.plotly_chart(px.bar(plot, x="성분", y="함량", title="영양성분(g)"), use_container_width=True)
-    else:
-        st.warning("아직 그래프로 표시할 영양정보가 없습니다.")
+with tab4:
+    target = st.number_input("한 끼 목표 칼로리 (kcal)", min_value=100, max_value=3000, value=700, step=50)
+    candidates = data[(data["kcal"].notna()) & (data["kcal"] <= target)].sort_values("kcal")
+    st.write(f"{target:,} kcal 이하 메뉴: {len(candidates)}개")
+    st.dataframe(candidates[["name", "category", "serving", "kcal"]].rename(columns={"name":"메뉴", "category":"분류", "serving":"기준량", "kcal":"칼로리"}), hide_index=True, use_container_width=True)
+    st.caption("칼로리 기준 필터이며 건강상 적합성을 판단하는 추천은 아닙니다.")
 
-if page == "🍔 전체 메뉴":
-    search = st.text_input("🔍 메뉴 검색", placeholder="예: 싸이버거")
-    categories = ["전체"] + sorted(df["category"].unique().tolist())
-    category = st.selectbox("카테고리", categories)
-    filtered = df[df["name"].str.contains(search, case=False, regex=False, na=False)]
-    if category != "전체":
-        filtered = filtered[filtered["category"] == category]
-    st.write(f"검색 결과: {len(filtered)}개")
-    if filtered.empty:
-        st.warning("일치하는 메뉴가 없습니다. 다른 검색어를 입력해 보세요.")
-    else:
-        for start in range(0, len(filtered), 3):
-            cols = st.columns(3)
-            for col, (_, row) in zip(cols, filtered.iloc[start:start + 3].iterrows()):
-                with col:
-                    card(row)
-        choice = st.selectbox("자세히 볼 메뉴", filtered["name"].tolist())
-        detail(filtered.set_index("name").loc[choice])
-
-elif page == "📊 메뉴 비교":
-    names = st.multiselect("비교할 메뉴(2개 이상)", df["name"].tolist(), max_selections=5)
-    if len(names) < 2:
-        st.info("메뉴를 2개 이상 선택하세요.")
-    else:
-        selected = df.set_index("name").loc[names]
-        st.dataframe(selected[list(NUMERIC)].rename(columns=NUMERIC).T, use_container_width=True)
-        plot = selected.reset_index().melt(id_vars="name", value_vars=["kcal"], var_name="성분", value_name="열량")
-        plot = plot.dropna(subset=["열량"])
-        if not plot.empty:
-            st.plotly_chart(px.bar(plot, x="name", y="열량", color="name", title="메뉴별 열량(kcal)"), use_container_width=True)
-        else:
-            st.warning("선택한 메뉴의 열량 정보가 없습니다.")
-
-elif page == "🍟 세트 계산":
-    st.write("메뉴별 수량을 선택하면 영양성분을 합산합니다.")
-    chosen = st.multiselect("세트에 포함할 메뉴", df["name"].tolist())
-    quantities = {name: st.number_input(name + " 수량", min_value=1, max_value=20, value=1, step=1, key="qty_" + name) for name in chosen}
-    if chosen:
-        selected = df.set_index("name").loc[chosen]
-        for key, label in NUMERIC.items():
-            values = selected[key]
-            if values.isna().any():
-                st.write(f"{label}: **계산 불가** (일부 메뉴의 정보 없음)")
-            else:
-                total = sum(float(selected.loc[name, key]) * quantities[name] for name in chosen)
-                st.write(f"{label}: **{total:,.1f}**")
-
-elif page == "🎯 목표 칼로리":
-    target = st.number_input("한 메뉴의 최대 열량(kcal)", min_value=1, max_value=5000, value=700, step=50)
-    known = df.dropna(subset=["kcal"])
-    recommended = known[known["kcal"] <= target].sort_values("kcal")
-    st.write(f"기준 이하 메뉴: {len(recommended)}개 (열량 정보가 있는 메뉴만 검색)")
-    if recommended.empty:
-        st.info("현재 조건에 맞는 검증된 열량 정보가 없습니다. CSV에 영양정보를 추가해 보세요.")
-    else:
-        st.dataframe(recommended[["name", "category", "kcal"]].rename(columns=NUMERIC), hide_index=True, use_container_width=True)
+with st.expander("📚 자료 및 AI 활용 안내"):
+    st.write("자료: FatSecret 맘스터치 제품 정보. 제품 변경 및 등록 시점에 따라 실제 값과 다를 수 있습니다.")
+    st.write("AI 도움: ChatGPT를 사용하여 Streamlit 구조, 예외 처리, CSV 읽기 예시를 작성함. 제출 전 코드를 이해하고 직접 테스트·수정한 내용을 기록하세요.")
