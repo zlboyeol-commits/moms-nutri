@@ -1,92 +1,487 @@
-from pathlib import Path
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+from pathlib import Path
+from urllib.parse import urljoin
 
-st.set_page_config(page_title="MOM'S NUTRI | 맘스터치 칼로리", page_icon="🍔", layout="wide")
-st.markdown("""<style>.block-container{max-width:1150px;padding-top:2rem}.stMetric{background:#fff4e9;padding:12px;border-radius:12px}</style>""", unsafe_allow_html=True)
+# ==============================
+# 기본 설정
+# ==============================
+
+st.set_page_config(
+    page_title="맘스터치 칼로리 분석기",
+    page_icon="🍔",
+    layout="wide"
+)
+
+st.markdown("""
+<style>
+.stApp {
+    background-color: #fffaf2;
+}
+h1, h2, h3 {
+    color: #d62828;
+}
+div[data-testid="stMetric"] {
+    background: white;
+    padding: 15px;
+    border-radius: 15px;
+    border: 1px solid #eeeeee;
+}
+</style>
+""", unsafe_allow_html=True)
+
 st.title("🍔 MOM'S NUTRI")
-st.caption("맘스터치 메뉴 칼로리 검색 · 비교 · 세트 계산 | 비공식 교육용 프로젝트")
+st.subheader("맘스터치 칼로리 분석기 PRO")
 
-DATA_FILE = Path(__file__).with_name("menu_data.csv")
-@st.cache_data
+st.caption("맘스터치 메뉴의 칼로리를 검색하고 비교해 보세요!")
 
+# ==============================
+# 메뉴 데이터 불러오기
+# ==============================
+
+@st.cache_data(ttl=300)
 def load_data():
-    df = pd.read_csv(DATA_FILE, encoding="utf-8-sig")
-    required = {"name", "category", "serving", "kcal", "source_url", "image_url"}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError("CSV에 필요한 열이 없습니다: " + ", ".join(sorted(missing)))
-    df["kcal"] = pd.to_numeric(df["kcal"], errors="coerce")
-    df["name"] = df["name"].fillna("").astype(str)
-    df["category"] = df["category"].fillna("기타").astype(str)
-    return df
+    try:
+        df = pd.read_csv("menu_data.csv", encoding="utf-8-sig")
 
-try:
-    data = load_data()
-except (FileNotFoundError, ValueError, UnicodeError, pd.errors.ParserError) as e:
-    st.error(f"메뉴 파일을 불러오지 못했습니다: {e}")
-    st.info("app.py와 menu_data.csv가 GitHub 저장소의 같은 위치에 있는지 확인하세요.")
-    st.stop()
+        # 기존 CSV와 새 CSV 모두 지원
+        if "menu_name" in df.columns and "name" not in df.columns:
+            df = df.rename(columns={"menu_name": "name"})
 
-st.warning("칼로리는 제3자 데이터베이스의 참고값입니다. 최신 공식 수치 및 현재 판매 여부는 확인이 필요합니다. 치킨 100g과 버거 1개의 칼로리를 직접 비교하지 마세요.")
-tab1, tab2, tab3, tab4 = st.tabs(["🍔 메뉴 찾기", "⚖️ 칼로리 비교", "🧮 식사 계산기", "🎯 목표 칼로리"])
+        if "calories" in df.columns and "kcal" not in df.columns:
+            df = df.rename(columns={"calories": "kcal"})
 
-with tab1:
-    search = st.text_input("메뉴 이름 검색", placeholder="예: 싸이버거")
-    cats = ["전체"] + sorted(data["category"].unique().tolist())
-    cat = st.selectbox("종류", cats)
-    found = data[data["name"].str.contains(search, case=False, regex=False, na=False)]
-    if cat != "전체":
-        found = found[found["category"] == cat]
-    st.caption(f"검색 결과: {len(found)}개")
-    if found.empty:
-        st.info("검색 결과가 없습니다. 다른 이름을 입력해 보세요.")
-    for start in range(0, len(found), 3):
-        cols = st.columns(3)
-        for col, (_, row) in zip(cols, found.iloc[start:start+3].iterrows()):
-            with col:
-                with st.container(border=True):
-                    if pd.notna(row["image_url"]) and str(row["image_url"]).strip():
-                        st.image(str(row["image_url"]), use_container_width=True)
-                    else:
-                        st.markdown("### 🍔 📷 사진 준비 중")
-                    st.subheader(row["name"])
-                    st.caption(f"{row['category']} · 기준: {row['serving']}")
-                    st.metric("칼로리", f"{row['kcal']:,.0f} kcal" if pd.notna(row["kcal"]) else "정보 없음")
-                    if pd.notna(row["source_url"]) and str(row["source_url"]).startswith("https://"):
-                        st.link_button("칼로리 출처 확인", str(row["source_url"]))
+        if "name" not in df.columns:
+            st.error("CSV에 name 열이 없습니다.")
+            st.stop()
 
-with tab2:
-    options = data["name"].tolist()
-    selected = st.multiselect("비교할 메뉴 선택 (최대 5개)", options, default=options[:2], max_selections=5)
-    comparison = data[data["name"].isin(selected)].dropna(subset=["kcal"])
-    if not comparison.empty:
-        st.bar_chart(comparison.set_index("name")["kcal"])
-        st.dataframe(comparison[["name", "serving", "kcal"]].rename(columns={"name":"메뉴", "serving":"기준량", "kcal":"kcal"}), hide_index=True, use_container_width=True)
-        st.caption("제공량이 다른 메뉴의 수치는 동일 조건의 비교가 아닙니다.")
-    else:
-        st.info("칼로리 정보가 있는 메뉴를 선택하세요.")
+        if "kcal" not in df.columns:
+            st.error("CSV에 kcal 열이 없습니다.")
+            st.stop()
 
-with tab3:
-    st.write("선택한 메뉴와 수량을 합산합니다. 100g 기준 메뉴는 수량 1이 100g입니다.")
-    choices = st.multiselect("먹을 메뉴 선택", options, key="meal")
-    total = 0.0
-    for name in choices:
-        row = data[data["name"] == name].iloc[0]
-        qty = st.number_input(f"{name} ({row['serving']}) 수량", min_value=0, max_value=30, value=1, step=1, key=f"qty_{name}")
+        if "category" not in df.columns:
+            df["category"] = "기타"
+
+        if "image_url" not in df.columns:
+            df["image_url"] = ""
+
+        df["name"] = df["name"].fillna("").astype(str)
+        df["category"] = df["category"].fillna("기타")
+        df["kcal"] = pd.to_numeric(df["kcal"], errors="coerce")
+        df["image_url"] = df["image_url"].fillna("")
+
+        return df
+
+    except FileNotFoundError:
+        st.error("menu_data.csv 파일이 없습니다!")
+        st.stop()
+
+    except Exception as e:
+        st.error(f"데이터 오류: {e}")
+        st.stop()
+
+
+df = load_data()
+
+# ==============================
+# 공식 메뉴 사진 찾기
+# ==============================
+
+OFFICIAL_URL = (
+    "https://order.momstouch.co.kr/"
+    "momsmall/menu.jsp?menu_cd=001"
+)
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def find_official_image(menu_name):
+    """
+    공식 메뉴 페이지에서 메뉴 이름과
+    일치하는 이미지가 있는지 확인합니다.
+
+    사이트 구조에 따라 실패할 수 있습니다.
+    """
+
+    try:
+        response = requests.get(
+            OFFICIAL_URL,
+            timeout=8,
+            headers={
+                "User-Agent": "Mozilla/5.0"
+            }
+        )
+
+        response.raise_for_status()
+
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
+
+        # 이미지의 alt 속성 확인
+        for img in soup.find_all("img"):
+            alt = img.get("alt", "").strip()
+            src = img.get("src", "")
+
+            if menu_name in alt and src:
+                return urljoin(OFFICIAL_URL, src)
+
+        # 메뉴 이름이 포함된 요소 주변 이미지 확인
+        for element in soup.find_all(
+            string=lambda text:
+            text is not None and menu_name in text
+        ):
+            parent = element.parent
+
+            for _ in range(3):
+                if parent is None:
+                    break
+
+                img = parent.find("img")
+
+                if img and img.get("src"):
+                    return urljoin(
+                        OFFICIAL_URL,
+                        img["src"]
+                    )
+
+                parent = parent.parent
+
+    except requests.RequestException:
+        pass
+
+    except Exception:
+        pass
+
+    return None
+
+
+def show_image(row):
+    name = row["name"]
+    image_url = str(row.get("image_url", "")).strip()
+
+    # 1. CSV에 등록된 사진
+    if image_url.startswith(("https://", "http://")):
+        try:
+            st.image(image_url, use_container_width=True)
+            return
+        except Exception:
+            pass
+
+    # 2. GitHub images 폴더에 등록된 사진
+    for ext in [".png", ".jpg", ".jpeg", ".webp"]:
+        path = Path("images") / (name + ext)
+
+        if path.is_file():
+            st.image(str(path), use_container_width=True)
+            return
+
+    # 3. 공식 사이트에서 사진 검색
+    found_image = find_official_image(name)
+
+    if found_image:
+        try:
+            st.image(
+                found_image,
+                use_container_width=True
+            )
+            return
+        except Exception:
+            pass
+
+    # 4. 사진이 없을 때
+    st.info("📷 메뉴 사진을 찾지 못했습니다.")
+
+
+# ==============================
+# 사이드바
+# ==============================
+
+st.sidebar.title("🍔 메뉴")
+
+page = st.sidebar.radio(
+    "기능 선택",
+    [
+        "🏠 전체 메뉴",
+        "🔍 메뉴 검색",
+        "📊 칼로리 비교",
+        "🍟 세트 계산기",
+        "🎯 칼로리 추천"
+    ]
+)
+
+st.sidebar.divider()
+
+st.sidebar.info(
+    "칼로리는 참고용입니다. "
+    "제품의 실제 영양정보와 다를 수 있습니다."
+)
+
+# ==============================
+# 메뉴 카드
+# ==============================
+
+def menu_card(row):
+    with st.container(border=True):
+        show_image(row)
+
+        st.markdown(f"### 🍔 {row['name']}")
+
         if pd.notna(row["kcal"]):
-            total += float(row["kcal"]) * qty
+            st.metric(
+                "🔥 칼로리",
+                f"{row['kcal']:,.0f} kcal"
+            )
         else:
-            st.warning(f"{name}: 칼로리 정보가 없어 합산에서 제외됩니다.")
-    st.metric("선택한 메뉴 합계", f"{total:,.0f} kcal")
+            st.warning("칼로리 정보 없음")
 
-with tab4:
-    target = st.number_input("한 끼 목표 칼로리 (kcal)", min_value=100, max_value=3000, value=700, step=50)
-    candidates = data[(data["kcal"].notna()) & (data["kcal"] <= target)].sort_values("kcal")
-    st.write(f"{target:,} kcal 이하 메뉴: {len(candidates)}개")
-    st.dataframe(candidates[["name", "category", "serving", "kcal"]].rename(columns={"name":"메뉴", "category":"분류", "serving":"기준량", "kcal":"칼로리"}), hide_index=True, use_container_width=True)
-    st.caption("칼로리 기준 필터이며 건강상 적합성을 판단하는 추천은 아닙니다.")
+        st.caption(f"카테고리: {row['category']}")
 
-with st.expander("📚 자료 및 AI 활용 안내"):
-    st.write("자료: FatSecret 맘스터치 제품 정보. 제품 변경 및 등록 시점에 따라 실제 값과 다를 수 있습니다.")
-    st.write("AI 도움: ChatGPT를 사용하여 Streamlit 구조, 예외 처리, CSV 읽기 예시를 작성함. 제출 전 코드를 이해하고 직접 테스트·수정한 내용을 기록하세요.")
+
+# ==============================
+# 1. 전체 메뉴
+# ==============================
+
+if page == "🏠 전체 메뉴":
+
+    st.header("🍔 맘스터치 전체 메뉴")
+
+    categories = ["전체"] + sorted(
+        df["category"].unique().tolist()
+    )
+
+    selected_category = st.selectbox(
+        "카테고리 선택",
+        categories
+    )
+
+    if selected_category == "전체":
+        filtered = df
+    else:
+        filtered = df[
+            df["category"] == selected_category
+        ]
+
+    st.success(f"총 {len(filtered)}개 메뉴")
+
+    columns = st.columns(3)
+
+    for i, (_, row) in enumerate(filtered.iterrows()):
+        with columns[i % 3]:
+            menu_card(row)
+
+
+# ==============================
+# 2. 메뉴 검색
+# ==============================
+
+elif page == "🔍 메뉴 검색":
+
+    st.header("🔍 메뉴 검색")
+
+    keyword = st.text_input(
+        "찾고 싶은 메뉴를 입력하세요",
+        placeholder="예: 싸이버거"
+    )
+
+    if keyword:
+        result = df[
+            df["name"].str.contains(
+                keyword,
+                case=False,
+                na=False,
+                regex=False
+            )
+        ]
+
+        if result.empty:
+            st.warning("검색 결과가 없습니다.")
+        else:
+            st.success(f"{len(result)}개 메뉴 발견!")
+
+            columns = st.columns(3)
+
+            for i, (_, row) in enumerate(result.iterrows()):
+                with columns[i % 3]:
+                    menu_card(row)
+
+    else:
+        st.info("메뉴 이름을 입력해 주세요.")
+
+
+# ==============================
+# 3. 칼로리 비교
+# ==============================
+
+elif page == "📊 칼로리 비교":
+
+    st.header("📊 메뉴별 칼로리 비교")
+
+    selected = st.multiselect(
+        "비교할 메뉴 선택",
+        df["name"].tolist()
+    )
+
+    if selected:
+        result = df[
+            df["name"].isin(selected)
+        ].dropna(subset=["kcal"])
+
+        if result.empty:
+            st.warning("칼로리 정보가 없습니다.")
+
+        else:
+            chart = result.set_index("name")["kcal"]
+
+            st.bar_chart(chart)
+
+            st.dataframe(
+                result[["name", "kcal"]],
+                hide_index=True,
+                use_container_width=True
+            )
+
+            highest = result.loc[
+                result["kcal"].idxmax()
+            ]
+
+            lowest = result.loc[
+                result["kcal"].idxmin()
+            ]
+
+            st.success(
+                f"🔥 가장 높은 칼로리: "
+                f"{highest['name']} "
+                f"({highest['kcal']:.0f} kcal)"
+            )
+
+            st.info(
+                f"🥗 가장 낮은 칼로리: "
+                f"{lowest['name']} "
+                f"({lowest['kcal']:.0f} kcal)"
+            )
+
+    else:
+        st.info("비교할 메뉴를 선택하세요.")
+
+
+# ==============================
+# 4. 세트 칼로리 계산기
+# ==============================
+
+elif page == "🍟 세트 계산기":
+
+    st.header("🍟 나만의 세트 계산기")
+
+    st.write(
+        "버거, 치킨, 사이드, 음료를 선택해 "
+        "총칼로리를 계산해 보세요."
+    )
+
+    selected = st.multiselect(
+        "먹을 메뉴 선택",
+        df["name"].tolist()
+    )
+
+    total = 0
+    missing = []
+
+    for name in selected:
+        row = df[df["name"] == name].iloc[0]
+
+        if pd.notna(row["kcal"]):
+            total += row["kcal"]
+        else:
+            missing.append(name)
+
+    st.divider()
+
+    st.metric(
+        "🔥 총칼로리",
+        f"{total:,.0f} kcal"
+    )
+
+    if missing:
+        st.warning(
+            "다음 메뉴는 칼로리 정보가 없어 "
+            "합계에서 제외했습니다: "
+            + ", ".join(missing)
+        )
+
+    if selected and not missing:
+        if total <= 500:
+            st.success("🥗 500kcal 이하입니다!")
+
+        elif total <= 1000:
+            st.info("🍔 총칼로리가 1,000kcal 이하입니다.")
+
+        else:
+            st.warning(
+                "🔥 총칼로리가 1,000kcal를 초과했습니다."
+            )
+
+    st.caption(
+        "이 기준은 단순한 열량 안내이며 "
+        "개인별 건강 상태를 평가하지 않습니다."
+    )
+
+
+# ==============================
+# 5. 목표 칼로리 추천
+# ==============================
+
+elif page == "🎯 칼로리 추천":
+
+    st.header("🎯 목표 칼로리 메뉴 찾기")
+
+    target = st.number_input(
+        "최대 칼로리 설정",
+        min_value=1,
+        max_value=5000,
+        value=600,
+        step=50
+    )
+
+    result = df[
+        (df["kcal"] <= target) &
+        (df["kcal"].notna())
+    ].sort_values("kcal")
+
+    if result.empty:
+        st.warning(
+            "설정한 칼로리 이하의 메뉴가 없습니다."
+        )
+
+    else:
+        st.success(
+            f"🔥 {target}kcal 이하 메뉴 "
+            f"{len(result)}개 발견!"
+        )
+
+        columns = st.columns(3)
+
+        for i, (_, row) in enumerate(result.iterrows()):
+            with columns[i % 3]:
+                menu_card(row)
+
+
+# ==============================
+# 하단 정보
+# ==============================
+
+st.divider()
+
+st.caption(
+    "MOM'S NUTRI | Python + Streamlit"
+)
+
+st.caption(
+    "비공식 학생 프로젝트입니다. "
+    "맘스터치 공식 서비스가 아닙니다."
+)
+
+st.link_button(
+    "🍔 맘스터치 공식 메뉴 확인",
+    OFFICIAL_URL
+)
